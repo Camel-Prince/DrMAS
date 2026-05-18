@@ -1,7 +1,8 @@
 #!/bin/bash
 # ============================================================================
 # DrMAS 一键环境搭建 & 训练启动脚本
-# 适用于: CUDA 12.4 + Python 3.10 + PyTorch 2.6 基础镜像
+# 适用于: CUDA 12.4 + Python 3.10 + PyTorch 2.6 + vllm 0.8.x 基础镜像
+# 默认使用 vllm 作为推理引擎（也可切换为 sglang，见下方注释）
 # 用法:
 #   bash setup_and_run.sh              # 完整流程：搭建环境 → 准备数据 → 启动训练
 #   bash setup_and_run.sh setup        # 仅搭建环境（不训练）
@@ -28,37 +29,42 @@ log_info()  { echo -e "${GREEN}[INFO]${NC}  $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# -------------------- Stage 0: 清理 vllm（如果有）--------------------
-stage_clean_vllm() {
-    log_info "Stage 0: 清理旧 vllm 及冲突推理库..."
-    pip uninstall -y vllm flash-attn flashinfer flashinfer-python 2>/dev/null || true
-    log_info "Stage 0: 清理完成"
+# -------------------- Stage 0: 确保 vllm 版本正确 --------------------
+stage_check_vllm() {
+    log_info "Stage 0: 检查 vllm 版本..."
+    # 确保 torch==2.6.0（setup.py vllm extras 依赖）
+    pip install torch==2.6.0 --quiet
+
+    # 如果镜像有 vllm 0.8.x 但和 torch 2.6 不兼容，重新安装
+    if ! python -c "import vllm; print(vllm.__version__)" 2>/dev/null; then
+        log_warn "vllm 未安装或不可用，安装 vllm==0.8.3..."
+        pip install vllm==0.8.3
+    else
+        vllm_ver=$(python -c "import vllm; print(vllm.__version__)")
+        log_info "检测到 vllm 版本: $vllm_ver"
+    fi
+    log_info "Stage 0: vllm 检查完成"
 }
 
 # -------------------- Stage 1: 安装 DrMAS 核心依赖 --------------------
 stage_install_core() {
-    log_info "Stage 1: 安装 sglang + flash-attn + liger-kernel..."
-
-    # 确保 torch==2.6.0（setup.py sglang extras 强制依赖）
-    pip install torch==2.6.0 --quiet
-
-    # sglang 推理引擎: [all] 包含 srt + openai + 所有推理后端（setup.py 用 [srt,openai]，这里用更全的 [all]）
-    pip install "sglang[all]==0.4.6.post5" \
-        --find-links https://flashinfer.ai/whl/cu124/torch2.6/flashinfer-python
+    log_info "Stage 1: 安装 flash-attn + liger-kernel + vllm..."
 
     # flash-attn: setup.py GPU_REQUIRES 中的核心加速库（编译可能需要几分钟）
-    log_info "安装 flash-attn（编译可能需要几分钟，请耐心等待）..."
-    pip install flash-attn==2.7.4.post1 --no-build-isolation --no-cache-dir
+    # 如果镜像已安装，跳过；否则从预编译 wheel 安装
+    if python -c "import flash_attn" 2>/dev/null; then
+        log_info "flash-attn 已安装，跳过"
+    else
+        log_info "安装 flash-attn（编译可能需要几分钟，请耐心等待）..."
+        pip install flash-attn==2.7.4.post1 --no-build-isolation --no-cache-dir
+    fi
 
     # liger-kernel: setup.py GPU_REQUIRES 中的高效 kernel 融合库
     pip install liger-kernel
 
-    # torch-memory-saver: setup.py SGLANG_REQUIRES 中的显存优化工具
-    pip install torch-memory-saver
-
-    # 安装 requirements_sglang.txt 中的依赖
+    # 安装 requirements.txt 中的依赖
     cd "$REPO_ROOT"
-    pip install -r requirements_sglang.txt
+    pip install -r requirements.txt
 
     # 以 editable 模式安装 DrMAS/veRL
     # install_requires 包含: ray>=2.41.0,<2.50.0, transformers>=4.52.1,<=4.53.2,
@@ -66,6 +72,11 @@ stage_install_core() {
     pip install -e .
 
     log_info "Stage 1: 核心依赖安装完成"
+
+    # 如果之后想用 sglang 作为推理后端，可以：
+    #   pip install "sglang[all]==0.4.6.post5" --find-links https://flashinfer.ai/whl/cu124/torch2.6/flashinfer-python
+    #   pip install torch-memory-saver
+    # 并将 run_search.sh 中的 rollout.name=vllm 改为 rollout.name=sglang
 }
 
 # -------------------- Stage 2: 安装 Search 环境 --------------------
@@ -180,7 +191,7 @@ main() {
     case "$action" in
         setup)
             # 仅环境搭建
-            stage_clean_vllm
+            stage_check_vllm
             stage_install_core
             stage_install_search_env
             stage_prepare_data
@@ -208,7 +219,7 @@ main() {
 
         all|*)
             # 完整流程：搭建环境 → 准备数据 → 启动检索服务器 → 训练
-            stage_clean_vllm
+            stage_check_vllm
             stage_install_core
             stage_install_search_env
             stage_prepare_data

@@ -4,7 +4,7 @@ set -x
 # DrMAS Math 训练 - 2×A800 (80GB) 极简配置
 # 
 # 关键优化:
-#   1. model_sharing=True → Solver+Verifier 共享 1 个模型 (1 个 sglang 实例)
+#   1. model_sharing=True → Solver+Verifier 共享 1 个模型 (1 个 vllm 实例)
 #   2. GRPO → 无 Critic (省 ~6GB/GPU)
 #   3. use_kl_loss=False → 无 Reference Model
 #   4. optimizer_offload=True → Adam 状态卸载到 CPU
@@ -96,11 +96,10 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-    actor_rollout_ref.rollout.name=sglang \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
-    actor_rollout_ref.rollout.enable_chunked_prefill=False \
-    actor_rollout_ref.rollout.enforce_eager=False \
-    actor_rollout_ref.rollout.free_cache_engine=False \
+    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
+    actor_rollout_ref.rollout.enforce_eager=True \
+    actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
