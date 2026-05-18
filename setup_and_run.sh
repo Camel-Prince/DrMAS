@@ -37,21 +37,32 @@ stage_clean_vllm() {
 
 # -------------------- Stage 1: 安装 DrMAS 核心依赖 --------------------
 stage_install_core() {
-    log_info "Stage 1: 安装 sglang + flash-attn..."
+    log_info "Stage 1: 安装 sglang + flash-attn + liger-kernel..."
+
+    # 确保 torch==2.6.0（setup.py sglang extras 强制依赖）
+    pip install torch==2.6.0 --quiet
+
+    # sglang 推理引擎: [all] 包含 srt + openai + 所有推理后端（setup.py 用 [srt,openai]，这里用更全的 [all]）
     pip install "sglang[all]==0.4.6.post5" \
         --find-links https://flashinfer.ai/whl/cu124/torch2.6/flashinfer-python
 
+    # flash-attn: setup.py GPU_REQUIRES 中的核心加速库（编译可能需要几分钟）
     log_info "安装 flash-attn（编译可能需要几分钟，请耐心等待）..."
     pip install flash-attn==2.7.4.post1 --no-build-isolation --no-cache-dir
 
-    log_info "安装 torch-memory-saver..."
+    # liger-kernel: setup.py GPU_REQUIRES 中的高效 kernel 融合库
+    pip install liger-kernel
+
+    # torch-memory-saver: setup.py SGLANG_REQUIRES 中的显存优化工具
     pip install torch-memory-saver
 
-    log_info "安装 requirements_sglang.txt 中的依赖..."
+    # 安装 requirements_sglang.txt 中的依赖
     cd "$REPO_ROOT"
     pip install -r requirements_sglang.txt
 
-    log_info "以 editable 模式安装 DrMAS/veRL..."
+    # 以 editable 模式安装 DrMAS/veRL
+    # install_requires 包含: ray>=2.41.0,<2.50.0, transformers>=4.52.1,<=4.53.2,
+    # packaging>=20.0, qwen-vl-utils[decord], tensordict<=0.6.2 等
     pip install -e .
 
     log_info "Stage 1: 核心依赖安装完成"
