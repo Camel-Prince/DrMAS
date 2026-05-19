@@ -9,6 +9,40 @@ from datasets import concatenate_datasets
 from verl.utils.hdfs_io import copy, makedirs
 
 
+def load_dataset_safe(hf_name: str, split: str = "train", ms_name: str = None):
+    """
+    Load a dataset, trying ModelScope first (if ms_name provided or aliased),
+    falling back to HuggingFace hub (with hf-mirror.com proxy).
+
+    Known ModelScope aliases:
+        HuggingFaceH4/aime_2024    → AI-ModelScope/aime_2024
+        HuggingFaceH4/MATH-500     → AI-ModelScope/MATH-500
+    """
+    _MS_ALIAS = {
+        "HuggingFaceH4/aime_2024": "AI-ModelScope/aime_2024",
+        "HuggingFaceH4/MATH-500": "AI-ModelScope/MATH-500",
+    }
+
+    load_name = ms_name or _MS_ALIAS.get(hf_name, hf_name)
+
+    # Try ModelScope first
+    if load_name != hf_name or ms_name is not None:
+        try:
+            from modelscope.msdatasets import MsDataset
+            print(f"  [ModelScope] Loading {load_name} (split={split})...")
+            ms_ds = MsDataset.load(load_name, subset_name="default", split=split)
+            if hasattr(ms_ds, "to_hf_dataset"):
+                return ms_ds.to_hf_dataset()
+            return ms_ds
+        except Exception as e:
+            print(f"  [ModelScope] Failed for {load_name}: {e}")
+
+    # Fallback: use HuggingFace with hf-mirror.com proxy
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    print(f"  [HF Mirror] Loading {hf_name} (split={split})...")
+    return datasets.load_dataset(hf_name, split=split)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_dir", default="~/data/drmas_math")
@@ -16,15 +50,21 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Training dataset: use hf-mirror.com directly (aaabiao/dapo_filter, ~17k questions)
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    print(f"  [HF Mirror] Loading aaabiao/dapo_filter (split=train)...")
     train_dataset = datasets.load_dataset("aaabiao/dapo_filter", split="train")
-    test_dataset_aime24 = datasets.load_dataset("HuggingFaceH4/aime_2024", split="train")
-    test_dataset_aime25 = datasets.load_dataset("MathArena/aime_2025", split="train")
-    test_dataset_math500 = datasets.load_dataset("HuggingFaceH4/MATH-500", split="test")
+
+    # Test datasets (ModelScope for aime_2024 & MATH-500, HF mirror for aime_2025)
+    test_dataset_aime24 = load_dataset_safe("HuggingFaceH4/aime_2024", split="train")
+    test_dataset_aime25 = load_dataset_safe("MathArena/aime_2025", split="train")
+    test_dataset_math500 = load_dataset_safe("HuggingFaceH4/MATH-500", split="test")
     test_dataset_math500_first50 = test_dataset_math500.select(range(50))
 
-    test_dataset_amc23 = datasets.load_dataset("knoveleng/AMC-23", split="train")
-    test_dataset_minerva = datasets.load_dataset("zwhe99/simplerl-minerva-math", split="test")
-    test_dataset_olympiadbench = datasets.load_dataset("realtreetune/olympiadbench", split="test")
+    # Optional evaluation datasets (not downloaded)
+    test_dataset_amc23 = None
+    test_dataset_minerva = None
+    test_dataset_olympiadbench = None
     # instruction_following = (
     #     r"You FIRST think about the reasoning process as an internal monologue and then provide the final answer. "
     #     r"The reasoning process MUST BE enclosed within <think> </think> tags. "
@@ -105,9 +145,14 @@ if __name__ == "__main__":
     test_dataset_aime25 = test_dataset_aime25.map(function=make_map_fn_test("test", "aime25"), with_indices=True)
     test_dataset_math500 = test_dataset_math500.map(function=make_map_fn_test("test", "math500"), with_indices=True)
     test_dataset_math500_first50 = test_dataset_math500_first50.map(function=make_map_fn_test("test", "math500_first50"), with_indices=True)
-    test_dataset_amc23 = test_dataset_amc23.map(function=make_map_fn_test("test", "amc23"), with_indices=True)
-    test_dataset_minerva = test_dataset_minerva.map(function=make_map_fn_test("test", "minerva"), with_indices=True)
-    test_dataset_olympiadbench = test_dataset_olympiadbench.map(function=make_map_fn_test("test", "olympiadbench"), with_indices=True)
+
+    # Map optional evaluation datasets (only if loaded successfully)
+    if test_dataset_amc23 is not None:
+        test_dataset_amc23 = test_dataset_amc23.map(function=make_map_fn_test("test", "amc23"), with_indices=True)
+    if test_dataset_minerva is not None:
+        test_dataset_minerva = test_dataset_minerva.map(function=make_map_fn_test("test", "minerva"), with_indices=True)
+    if test_dataset_olympiadbench is not None:
+        test_dataset_olympiadbench = test_dataset_olympiadbench.map(function=make_map_fn_test("test", "olympiadbench"), with_indices=True)
 
     local_dir = args.local_dir
     hdfs_dir = args.hdfs_dir
@@ -115,7 +160,16 @@ if __name__ == "__main__":
     test_dataset_sampled = concatenate_datasets([test_dataset_math500_first50, test_dataset_aime24, test_dataset_aime25])
     print(f"Combined test_dataset_sampled length: {len(test_dataset_sampled)}")
 
-    test_dataset_full = concatenate_datasets([test_dataset_math500,test_dataset_aime24, test_dataset_aime25, test_dataset_olympiadbench, test_dataset_amc23, test_dataset_minerva])
+    # Build full test dataset (include optional datasets if available)
+    full_test_parts = [test_dataset_math500, test_dataset_aime24, test_dataset_aime25]
+    for ds, name in [(test_dataset_olympiadbench, "olympiadbench"),
+                      (test_dataset_amc23, "amc23"),
+                      (test_dataset_minerva, "minerva")]:
+        if ds is not None:
+            full_test_parts.append(ds)
+        else:
+            print(f"  Skipping {name} (not available)")
+    test_dataset_full = concatenate_datasets(full_test_parts)
     print(f"Combined test_dataset_full length: {len(test_dataset_full)}")
 
     train_dataset.to_parquet(os.path.join(local_dir, "train.parquet"))
